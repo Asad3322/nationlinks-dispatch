@@ -1,147 +1,50 @@
-import fs from 'fs';
-import path from 'path';
+import { PrismaClient, Prisma } from '@prisma/client';
 import { Driver, Payment, DashboardStats, DriverQueryOptions, PaymentQueryOptions, PaginatedResult } from './types';
 import { toCents, centsToDollars } from './currency';
-import { parseStartDate, parseEndDate, isToday } from './dates';
-
-// Prisma client dynamic instantiation for Supabase PostgreSQL
-let prismaClientInstance: any = null;
-try {
-  // Use dynamic require so bundler does not choke when Prisma client is generating
-  const req = typeof window === 'undefined' ? eval('require') : null;
-  if (req) {
-    const { PrismaClient } = req('@prisma/client');
-    const globalForPrisma = globalThis as unknown as { prisma: any };
-    prismaClientInstance =
-      globalForPrisma.prisma ??
-      new PrismaClient({
-        log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
-      });
-    if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = prismaClientInstance;
-  }
-} catch {
-  // Client will be initialized once @prisma/client is installed and generated
-}
-
-export const prisma = prismaClientInstance;
-
-export type DataBackendMode = 'postgres' | 'json';
+import { parseStartDate, parseEndDate } from './dates';
 
 /**
- * Resolves the active data backend mode.
- * - Explicit DATA_BACKEND=postgres requires Supabase PostgreSQL.
- * - Explicit DATA_BACKEND=json enables offline local file development.
- * - Production ALWAYS defaults to postgres; never silently falls back to JSON.
+ * Supabase PostgreSQL is the ONLY data source for this application.
+ * There is no seed data, no local file store and no fallback backend: if the
+ * database is unconfigured or unreachable, every read and write fails loudly
+ * so the UI can never display numbers that did not come from the database.
  */
-export function getDataBackendMode(): DataBackendMode {
-  const backend = (process.env.DATA_BACKEND || '').trim().toLowerCase();
-  if (backend === 'postgres') return 'postgres';
-  if (backend === 'json') return 'json';
-
-  if (process.env.NODE_ENV === 'production') {
-    return 'postgres';
-  }
-  return 'json';
-}
-
-/**
- * Asserts that Supabase PostgreSQL is configured with real non-placeholder credentials.
- * Throws explicit error if credentials are missing or placeholders.
- * Strictly prevents silent fallback to JSON.
- */
-export function assertPostgresConfigured(): void {
+function assertDatabaseConfigured(): void {
   const url = process.env.DATABASE_URL;
-  if (!url || url.includes('placeholder') || url.includes('[PROJECT_REF]')) {
+  if (!url || !url.trim()) {
     throw new Error(
-      'Database Configuration Error: Supabase credentials are required in .env.local. Silent fallback to JSON is strictly disabled.'
+      'Database Configuration Error: DATABASE_URL is not set. Add your Supabase connection string to .env.local.'
     );
   }
-  if (!prisma) {
+  // Any unreplaced [TOKEN] from the env template counts as an unconfigured value,
+  // so a missing DB password surfaces as a config error rather than a driver error.
+  if (url.includes('placeholder') || /\[[A-Z_]+\]/.test(url)) {
     throw new Error(
-      'Database Initialization Error: Prisma Client is not initialized. Please ensure DATABASE_URL is valid in .env.local and Prisma Client has been generated.'
+      'Database Configuration Error: DATABASE_URL still contains an unreplaced placeholder. ' +
+        'Fill in your Supabase database password and region in .env.local.'
     );
   }
 }
 
-// Fallback file persistence path for reliable local development
-const DATA_DIR = path.join(process.cwd(), '.data');
-const DATA_FILE = path.join(DATA_DIR, 'nationlinks_data.json');
+const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
 
-// Reference drivers from specification/screenshot with NO fake payments (Rule #3)
-const INITIAL_DRIVERS: Omit<Driver, 'id' | 'createdAt' | 'updatedAt'>[] = [
-  { driverNumber: 1, driverName: 'John Smith', status: 'active' },
-  { driverNumber: 3, driverName: 'Michael Doe', status: 'active' },
-  { driverNumber: 4, driverName: 'David Smith', status: 'active' },
-  { driverNumber: 5, driverName: 'Robert Johnson', status: 'active' },
-  { driverNumber: 8, driverName: 'James Wilson', status: 'active' },
-  { driverNumber: 9, driverName: 'William Brown', status: 'active' },
-  { driverNumber: 32, driverName: 'Richard Davis', status: 'active' },
-  { driverNumber: 45, driverName: 'Thomas Miller', status: 'active' },
-  { driverNumber: 54, driverName: 'Charles Anderson', status: 'active' },
-  { driverNumber: 60, driverName: 'Joseph Taylor', status: 'active' },
-  { driverNumber: 79, driverName: 'Daniel Thomas', status: 'active' },
-  { driverNumber: 85, driverName: 'Matthew White', status: 'active' },
-  { driverNumber: 86, driverName: 'Anthony Harris', status: 'active' },
-];
-
-interface LocalDataStore {
-  drivers: Driver[];
-  payments: Payment[];
-}
-
-function loadLocalStore(): LocalDataStore {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    if (fs.existsSync(DATA_FILE)) {
-      const raw = fs.readFileSync(DATA_FILE, 'utf-8');
-      return JSON.parse(raw);
-    }
-  } catch (err) {
-    console.error('Error reading local data file, re-initializing:', err);
+/**
+ * Returns the shared Prisma client, creating it on first use.
+ * Instantiation is lazy so that a missing DATABASE_URL produces the explicit
+ * configuration error above instead of an opaque client construction failure.
+ */
+export function getPrisma(): PrismaClient {
+  if (!globalForPrisma.prisma) {
+    assertDatabaseConfigured();
+    globalForPrisma.prisma = new PrismaClient({
+      log: process.env.NODE_ENV === 'development' ? ['error', 'warn'] : ['error'],
+    });
   }
-
-  // Seed default drivers (without fake payments per spec Rule #3)
-  const now = new Date().toISOString();
-  const seededDrivers: Driver[] = INITIAL_DRIVERS.map((d, index) => ({
-    id: `drv-${d.driverNumber}-${index}`,
-    driverNumber: d.driverNumber,
-    driverName: d.driverName,
-    status: d.status,
-    createdAt: now,
-    updatedAt: now,
-  }));
-
-  const initialStore: LocalDataStore = {
-    drivers: seededDrivers,
-    payments: [],
-  };
-
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(initialStore, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Error writing initial store:', err);
-  }
-
-  return initialStore;
-}
-
-function saveLocalStore(store: LocalDataStore) {
-  try {
-    if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-    }
-    fs.writeFileSync(DATA_FILE, JSON.stringify(store, null, 2), 'utf-8');
-  } catch (err) {
-    console.error('Failed to persist store:', err);
-  }
+  return globalForPrisma.prisma;
 }
 
 /**
- * Unified Database Service
- * Connects to Supabase PostgreSQL when DATA_BACKEND=postgres,
- * and provides file persistence ONLY when explicitly configured with DATA_BACKEND=json.
+ * Unified Database Service — backed exclusively by Supabase PostgreSQL.
  */
 export const dbService = {
   // -------------------------------------------------------------
@@ -160,170 +63,87 @@ export const dbService = {
       toDate,
     } = options;
 
-    const startDate = parseStartDate(fromDate);
-    const endDate = parseEndDate(toDate);
+    const startDate = parseStartDate(fromDate) ?? null;
+    const endDate = parseEndDate(toDate) ?? null;
+    const prisma = getPrisma();
 
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
-
-      const where: any = {};
-      if (status) where.status = status;
-      if (search.trim()) {
-        const num = parseInt(search.trim(), 10);
-        if (!isNaN(num)) {
-          where.OR = [
-            { driverNumber: num },
-            { driverName: { contains: search.trim(), mode: 'insensitive' } },
-          ];
-        } else {
-          where.driverName = { contains: search.trim(), mode: 'insensitive' };
-        }
-      }
-
-      const total = await prisma.driver.count({ where });
-
-      const rawDrivers = await prisma.driver.findMany({
-        where,
-        include: {
-          payments: {
-            orderBy: { paymentDate: 'desc' },
-          },
-        },
-      });
-
-      // Compute aggregations using cent-safe arithmetic
-      const enriched: Driver[] = rawDrivers.map((d: any) => {
-        const allPayments = d.payments || [];
-        let activePayments = allPayments.filter((p: any) => p.status === 'active');
-
-        // Apply date filter to active payments for period totals if specified
-        if (startDate) {
-          activePayments = activePayments.filter((p: any) => new Date(p.paymentDate).getTime() >= startDate.getTime());
-        }
-        if (endDate) {
-          activePayments = activePayments.filter((p: any) => new Date(p.paymentDate).getTime() <= endDate.getTime());
-        }
-
-        const totalCents = activePayments.reduce((sum: number, p: any) => sum + toCents(Number(p.amount)), 0);
-        const lastPayment = activePayments[0]?.paymentDate?.toISOString() || null;
-        return {
-          id: d.id,
-          driverNumber: d.driverNumber,
-          driverName: d.driverName,
-          status: d.status as any,
-          createdAt: d.createdAt.toISOString(),
-          updatedAt: d.updatedAt.toISOString(),
-          totalPaid: centsToDollars(totalCents),
-          lastPaymentDate: lastPayment,
-          paymentCount: allPayments.length,
-        };
-      });
-
-      // Default & manual sorting: Numeric Ascending by default (1, 3, 4, 5... 86)
-      enriched.sort((a: Driver, b: Driver) => {
-        if (sortBy === 'driverNumber') {
-          return sortOrder === 'asc' ? a.driverNumber - b.driverNumber : b.driverNumber - a.driverNumber;
-        }
-        if (sortBy === 'driverName') {
-          const cmp = a.driverName.localeCompare(b.driverName, undefined, { sensitivity: 'base' });
-          return sortOrder === 'asc' ? cmp : -cmp;
-        }
-        if (sortBy === 'totalPaid') {
-          const diff = toCents(a.totalPaid || 0) - toCents(b.totalPaid || 0);
-          return sortOrder === 'asc' ? diff : -diff;
-        }
-        if (sortBy === 'lastPaymentDate') {
-          const timeA = a.lastPaymentDate ? new Date(a.lastPaymentDate).getTime() : 0;
-          const timeB = b.lastPaymentDate ? new Date(b.lastPaymentDate).getTime() : 0;
-          return sortOrder === 'asc' ? timeA - timeB : timeB - timeA;
-        }
-        return a.driverNumber - b.driverNumber;
-      });
-
-      const start = (page - 1) * limit;
-      const pagedData = enriched.slice(start, start + limit);
-
-      return {
-        data: pagedData,
-        pagination: {
-          total,
-          page,
-          limit,
-          totalPages: Math.ceil(total / limit) || 1,
-        },
-      };
-    }
-
-    // Explicit Local file-backed driver repository (DATA_BACKEND=json)
-    const store = loadLocalStore();
-    let drivers = [...store.drivers];
-
-    // Status filter
-    if (status) {
-      drivers = drivers.filter((d) => d.status === status);
-    }
-
-    // Search filter (number or case-insensitive name)
+    // Driver-level filters (status / search).
+    const conditions: Prisma.Sql[] = [];
+    if (status) conditions.push(Prisma.sql`d.status = ${status}`);
     if (search.trim()) {
-      const q = search.trim().toLowerCase();
-      const numQuery = parseInt(search.trim(), 10);
-      drivers = drivers.filter((d) => {
-        const matchesName = d.driverName.toLowerCase().includes(q);
-        const matchesNum = !isNaN(numQuery) && d.driverNumber === numQuery;
-        return matchesName || matchesNum;
-      });
+      const term = search.trim();
+      const num = parseInt(term, 10);
+      const like = `%${term}%`;
+      conditions.push(
+        isNaN(num)
+          ? Prisma.sql`d.driver_name ILIKE ${like}`
+          : Prisma.sql`(d.driver_number = ${num} OR d.driver_name ILIKE ${like})`
+      );
     }
+    const whereSql = conditions.length
+      ? Prisma.sql`WHERE ${Prisma.join(conditions, ' AND ')}`
+      : Prisma.empty;
 
-    // Compute totals per driver using safe cents
-    const enrichedDrivers: Driver[] = drivers.map((d: Driver) => {
-      const allPayments = store.payments.filter((p: Payment) => p.driverId === d.id);
-      let activePayments = allPayments.filter((p: Payment) => p.status === 'active');
+    // Totals count only active payments, and honour the date range when given.
+    const inPeriod = Prisma.sql`
+      p.status = 'active'
+      AND (${startDate}::timestamptz IS NULL OR p.payment_date >= ${startDate}::timestamptz)
+      AND (${endDate}::timestamptz IS NULL OR p.payment_date <= ${endDate}::timestamptz)`;
 
-      if (startDate) {
-        activePayments = activePayments.filter((p: Payment) => new Date(p.paymentDate).getTime() >= startDate.getTime());
-      }
-      if (endDate) {
-        activePayments = activePayments.filter((p: Payment) => new Date(p.paymentDate).getTime() <= endDate.getTime());
-      }
+    // sortBy/sortOrder come from a closed union, so this interpolation is a
+    // whitelist lookup rather than user-controlled SQL.
+    const sortColumn = {
+      driverNumber: 'd.driver_number',
+      driverName: 'd.driver_name',
+      totalPaid: 'total_paid',
+      lastPaymentDate: 'last_payment_date',
+    }[sortBy] ?? 'd.driver_number';
+    const direction = sortOrder === 'desc' ? 'DESC' : 'ASC';
+    // Drivers with no payments sorted as 0 / epoch previously, so keep nulls at
+    // the bottom of a descending sort and the top of an ascending one.
+    const nulls = direction === 'DESC' ? 'NULLS LAST' : 'NULLS FIRST';
+    const orderSql = Prisma.raw(`${sortColumn} ${direction} ${nulls}, d.driver_number ASC`);
 
-      activePayments.sort((a: Payment, b: Payment) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime());
+    const offset = (page - 1) * limit;
 
-      const totalCents = activePayments.reduce((sum: number, p: Payment) => sum + toCents(p.amount), 0);
-      return {
-        ...d,
-        totalPaid: centsToDollars(totalCents),
-        lastPaymentDate: activePayments[0]?.paymentDate || null,
-        paymentCount: allPayments.length,
-      };
-    });
+    // One round trip: filter, aggregate, sort, paginate and count in a single
+    // query. COUNT(*) OVER () runs after GROUP BY, so it counts matching drivers.
+    const rows = await prisma.$queryRaw<any[]>(Prisma.sql`
+      SELECT
+        d.id,
+        d.driver_number,
+        d.driver_name,
+        d.status,
+        d.created_at,
+        d.updated_at,
+        COALESCE(SUM(p.amount) FILTER (WHERE ${inPeriod}), 0) AS total_paid,
+        MAX(p.payment_date) FILTER (WHERE ${inPeriod}) AS last_payment_date,
+        COUNT(p.id) AS payment_count,
+        COUNT(*) OVER () AS total_count
+      FROM drivers d
+      LEFT JOIN payments p ON p.driver_id = d.id
+      ${whereSql}
+      GROUP BY d.id
+      ORDER BY ${orderSql}
+      LIMIT ${limit} OFFSET ${offset}
+    `);
 
-    // Default & manual sorting: Numeric Ascending by default!
-    enrichedDrivers.sort((a: Driver, b: Driver) => {
-      if (sortBy === 'driverNumber') {
-        return sortOrder === 'asc' ? a.driverNumber - b.driverNumber : b.driverNumber - a.driverNumber;
-      }
-      if (sortBy === 'driverName') {
-        const cmp = a.driverName.localeCompare(b.driverName, undefined, { sensitivity: 'base' });
-        return sortOrder === 'asc' ? cmp : -cmp;
-      }
-      if (sortBy === 'totalPaid') {
-        const diff = toCents(a.totalPaid || 0) - toCents(b.totalPaid || 0);
-        return sortOrder === 'asc' ? diff : -diff;
-      }
-      if (sortBy === 'lastPaymentDate') {
-        const timeA = a.lastPaymentDate ? new Date(a.lastPaymentDate).getTime() : 0;
-        const timeB = b.lastPaymentDate ? new Date(b.lastPaymentDate).getTime() : 0;
-        return sortOrder === 'asc' ? timeA - timeB : timeB - timeA;
-      }
-      return a.driverNumber - b.driverNumber;
-    });
+    const total = rows.length > 0 ? Number(rows[0].total_count) : 0;
 
-    const total = enrichedDrivers.length;
-    const start = (page - 1) * limit;
-    const pagedData = enrichedDrivers.slice(start, start + limit);
+    const data: Driver[] = rows.map((r) => ({
+      id: r.id,
+      driverNumber: r.driver_number,
+      driverName: r.driver_name,
+      status: r.status as any,
+      createdAt: new Date(r.created_at).toISOString(),
+      updatedAt: new Date(r.updated_at).toISOString(),
+      totalPaid: centsToDollars(toCents(Number(r.total_paid))),
+      lastPaymentDate: r.last_payment_date ? new Date(r.last_payment_date).toISOString() : null,
+      paymentCount: Number(r.payment_count),
+    }));
 
     return {
-      data: pagedData,
+      data,
       pagination: {
         total,
         page,
@@ -334,159 +154,105 @@ export const dbService = {
   },
 
   async getDriverById(id: string): Promise<Driver | null> {
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
-      const d = await prisma.driver.findUnique({
-        where: { id },
-        include: {
-          payments: {
-            orderBy: { paymentDate: 'desc' },
-          },
+    const prisma = getPrisma();
+    const d = await prisma.driver.findUnique({
+      where: { id },
+      include: {
+        payments: {
+          orderBy: { paymentDate: 'desc' },
         },
-      });
-      if (!d) return null;
-      const allPayments = d.payments || [];
-      const activePayments = allPayments.filter((p: any) => p.status === 'active');
-      const totalCents = activePayments.reduce((sum: number, p: any) => sum + toCents(Number(p.amount)), 0);
-      return {
-        id: d.id,
-        driverNumber: d.driverNumber,
-        driverName: d.driverName,
-        status: d.status as any,
-        createdAt: d.createdAt.toISOString(),
-        updatedAt: d.updatedAt.toISOString(),
-        totalPaid: centsToDollars(totalCents),
-        lastPaymentDate: activePayments[0]?.paymentDate?.toISOString() || null,
-        paymentCount: allPayments.length,
-      };
-    }
+      },
+    });
+    if (!d) return null;
 
-    const store = loadLocalStore();
-    const driver = store.drivers.find((d) => d.id === id);
-    if (!driver) return null;
-
-    const allPayments = store.payments.filter((p) => p.driverId === id);
-    const activePayments = allPayments
-      .filter((p) => p.status === 'active')
-      .sort((a, b) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime());
-
-    const totalCents = activePayments.reduce((sum: number, p: Payment) => sum + toCents(p.amount), 0);
-
+    const allPayments = d.payments || [];
+    const activePayments = allPayments.filter((p: any) => p.status === 'active');
+    const totalCents = activePayments.reduce((sum: number, p: any) => sum + toCents(Number(p.amount)), 0);
     return {
-      ...driver,
+      id: d.id,
+      driverNumber: d.driverNumber,
+      driverName: d.driverName,
+      status: d.status as any,
+      createdAt: d.createdAt.toISOString(),
+      updatedAt: d.updatedAt.toISOString(),
       totalPaid: centsToDollars(totalCents),
-      lastPaymentDate: activePayments[0]?.paymentDate || null,
+      lastPaymentDate: activePayments[0]?.paymentDate?.toISOString() || null,
       paymentCount: allPayments.length,
     };
   },
 
   async getDriverByNumber(driverNumber: number): Promise<Driver | null> {
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
-      const d = await prisma.driver.findUnique({
-        where: { driverNumber },
-        include: {
-          payments: {
-            orderBy: { paymentDate: 'desc' },
-          },
+    const prisma = getPrisma();
+    const d = await prisma.driver.findUnique({
+      where: { driverNumber },
+      include: {
+        payments: {
+          orderBy: { paymentDate: 'desc' },
         },
-      });
-      if (!d) return null;
-      const allPayments = d.payments || [];
-      const activePayments = allPayments.filter((p: any) => p.status === 'active');
-      const totalCents = activePayments.reduce((sum: number, p: any) => sum + toCents(Number(p.amount)), 0);
-      return {
-        id: d.id,
-        driverNumber: d.driverNumber,
-        driverName: d.driverName,
-        status: d.status as any,
-        createdAt: d.createdAt.toISOString(),
-        updatedAt: d.updatedAt.toISOString(),
-        totalPaid: centsToDollars(totalCents),
-        lastPaymentDate: activePayments[0]?.paymentDate?.toISOString() || null,
-        paymentCount: allPayments.length,
-      };
-    }
+      },
+    });
+    if (!d) return null;
 
-    const store = loadLocalStore();
-    const driver = store.drivers.find((d) => d.driverNumber === driverNumber);
-    if (!driver) return null;
-
-    const allPayments = store.payments.filter((p) => p.driverId === driver.id);
-    const activePayments = allPayments
-      .filter((p) => p.status === 'active')
-      .sort((a, b) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime());
-
-    const totalCents = activePayments.reduce((sum: number, p: Payment) => sum + toCents(p.amount), 0);
-
+    const allPayments = d.payments || [];
+    const activePayments = allPayments.filter((p: any) => p.status === 'active');
+    const totalCents = activePayments.reduce((sum: number, p: any) => sum + toCents(Number(p.amount)), 0);
     return {
-      ...driver,
+      id: d.id,
+      driverNumber: d.driverNumber,
+      driverName: d.driverName,
+      status: d.status as any,
+      createdAt: d.createdAt.toISOString(),
+      updatedAt: d.updatedAt.toISOString(),
       totalPaid: centsToDollars(totalCents),
-      lastPaymentDate: activePayments[0]?.paymentDate || null,
+      lastPaymentDate: activePayments[0]?.paymentDate?.toISOString() || null,
       paymentCount: allPayments.length,
     };
   },
 
-  async createDriver(data: { driverNumber: number; driverName: string; status?: 'active' | 'inactive' }): Promise<Driver> {
-    const { driverNumber, driverName, status = 'active' } = data;
+  async createDriver(data: { driverNumber: number; driverName?: string; status?: 'active' | 'inactive' }): Promise<Driver> {
+    const { driverNumber, status = 'active' } = data;
+    // Drivers are identified by number; the name is an optional label.
+    const driverName = data.driverName?.trim() || `Driver #${driverNumber}`;
+    const prisma = getPrisma();
 
     const existing = await this.getDriverByNumber(driverNumber);
     if (existing) {
       throw new Error(`Driver Number #${driverNumber} already exists in the system.`);
     }
 
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
-      try {
-        const created = await prisma.driver.create({
-          data: {
-            driverNumber,
-            driverName: driverName.trim(),
-            status,
-          },
-        });
-        return {
-          id: created.id,
-          driverNumber: created.driverNumber,
-          driverName: created.driverName,
-          status: created.status as any,
-          createdAt: created.createdAt.toISOString(),
-          updatedAt: created.updatedAt.toISOString(),
-          totalPaid: 0,
-          lastPaymentDate: null,
-          paymentCount: 0,
-        };
-      } catch (err: any) {
-        if (err?.code === 'P2002') {
-          throw new Error(`Driver Number #${driverNumber} already exists.`);
-        }
-        throw err;
+    try {
+      const created = await prisma.driver.create({
+        data: {
+          driverNumber,
+          driverName,
+          status,
+        },
+      });
+      return {
+        id: created.id,
+        driverNumber: created.driverNumber,
+        driverName: created.driverName,
+        status: created.status as any,
+        createdAt: created.createdAt.toISOString(),
+        updatedAt: created.updatedAt.toISOString(),
+        totalPaid: 0,
+        lastPaymentDate: null,
+        paymentCount: 0,
+      };
+    } catch (err: any) {
+      if (err?.code === 'P2002') {
+        throw new Error(`Driver Number #${driverNumber} already exists.`);
       }
+      throw err;
     }
-
-    const store = loadLocalStore();
-    const now = new Date().toISOString();
-    const newDriver: Driver = {
-      id: `drv-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-      driverNumber,
-      driverName: driverName.trim(),
-      status,
-      createdAt: now,
-      updatedAt: now,
-      totalPaid: 0,
-      lastPaymentDate: null,
-      paymentCount: 0,
-    };
-
-    store.drivers.push(newDriver);
-    saveLocalStore(store);
-    return newDriver;
   },
 
   async updateDriver(
     id: string,
     data: { driverName?: string; status?: 'active' | 'inactive'; driverNumber?: number }
   ): Promise<Driver> {
+    const prisma = getPrisma();
+
     if (data.driverNumber !== undefined) {
       const existing = await this.getDriverByNumber(data.driverNumber);
       if (existing && existing.id !== id) {
@@ -494,101 +260,73 @@ export const dbService = {
       }
     }
 
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
-      const updateData: any = {};
-      if (data.driverName !== undefined) updateData.driverName = data.driverName.trim();
-      if (data.status !== undefined) updateData.status = data.status;
-      if (data.driverNumber !== undefined) updateData.driverNumber = data.driverNumber;
+    const updateData: any = {};
+    if (data.driverName !== undefined) updateData.driverName = data.driverName.trim();
+    if (data.status !== undefined) updateData.status = data.status;
+    if (data.driverNumber !== undefined) updateData.driverNumber = data.driverNumber;
 
-      const updated = await prisma.driver.update({
-        where: { id },
-        data: updateData,
-      });
+    const updated = await prisma.driver.update({
+      where: { id },
+      data: updateData,
+    });
 
-      const res = await this.getDriverById(updated.id);
-      if (!res) throw new Error(`Failed to load updated driver #${updated.driverNumber}`);
-      return res;
-    }
-
-    const store = loadLocalStore();
-    const idx = store.drivers.findIndex((d) => d.id === id);
-    if (idx === -1) {
-      throw new Error(`Driver with ID ${id} not found.`);
-    }
-
-    const d = store.drivers[idx];
-    const updated: Driver = {
-      ...d,
-      driverName: data.driverName !== undefined ? data.driverName.trim() : d.driverName,
-      status: data.status !== undefined ? data.status : d.status,
-      driverNumber: data.driverNumber !== undefined ? data.driverNumber : d.driverNumber,
-      updatedAt: new Date().toISOString(),
-    };
-
-    store.drivers[idx] = updated;
-    saveLocalStore(store);
-
-    return this.getDriverById(id) as Promise<Driver>;
+    const res = await this.getDriverById(updated.id);
+    if (!res) throw new Error(`Failed to load updated driver #${updated.driverNumber}`);
+    return res;
   },
 
-  async deleteDriver(id: string): Promise<{ success: boolean; mode: 'deleted' | 'deactivated'; message: string; driver: Driver }> {
+  async deleteDriver(
+    id: string,
+    options: { force?: boolean } = {}
+  ): Promise<{ success: boolean; mode: 'deleted' | 'deactivated'; message: string; driver: Driver }> {
+    const prisma = getPrisma();
+
     const driver = await this.getDriverById(id);
     if (!driver) {
       throw new Error(`Driver with ID ${id} not found.`);
     }
 
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
-      const paymentCount = await prisma.payment.count({
-        where: { driverId: id },
-      });
+    const paymentCount = await prisma.payment.count({
+      where: { driverId: id },
+    });
 
-      if (paymentCount > 0) {
-        const deactivated = await this.updateDriver(id, { status: 'inactive' });
-        return {
-          success: true,
-          mode: 'deactivated',
-          message: `Driver #${driver.driverNumber} (${driver.driverName}) has ${paymentCount} financial transaction record(s) and was deactivated to preserve audit history.`,
-          driver: deactivated,
-        };
-      }
-
-      await prisma.driver.delete({
-        where: { id },
-      });
-
+    // Force delete removes the driver together with their payment history.
+    // Both statements run in one transaction so a driver can never be left
+    // behind with its payments already gone, or vice versa.
+    if (options.force) {
+      await prisma.$transaction([
+        prisma.payment.deleteMany({ where: { driverId: id } }),
+        prisma.driver.delete({ where: { id } }),
+      ]);
       return {
         success: true,
         mode: 'deleted',
-        message: `Driver #${driver.driverNumber} (${driver.driverName}) has been permanently deleted.`,
+        message:
+          paymentCount > 0
+            ? `Driver #${driver.driverNumber} and ${paymentCount} payment record(s) have been permanently deleted.`
+            : `Driver #${driver.driverNumber} has been permanently deleted.`,
         driver,
       };
     }
-
-    const store = loadLocalStore();
-    const paymentCount = store.payments.filter((p) => p.driverId === id).length;
 
     if (paymentCount > 0) {
       const deactivated = await this.updateDriver(id, { status: 'inactive' });
       return {
         success: true,
         mode: 'deactivated',
-        message: `Driver #${driver.driverNumber} (${driver.driverName}) has ${paymentCount} financial transaction record(s) and was deactivated to preserve audit history.`,
+        message: `Driver #${driver.driverNumber} has ${paymentCount} financial transaction record(s) and was deactivated to preserve audit history.`,
         driver: deactivated,
       };
     }
 
-    const idx = store.drivers.findIndex((d) => d.id === id);
-    if (idx !== -1) {
-      store.drivers.splice(idx, 1);
-      saveLocalStore(store);
-    }
+    await prisma.driver.delete({
+      where: { id },
+    });
 
     return {
       success: true,
       mode: 'deleted',
-      message: `Driver #${driver.driverNumber} (${driver.driverName}) has been permanently deleted.`,
+      message: `Driver #${driver.driverNumber} has been permanently deleted.`,
       driver,
     };
   },
@@ -600,102 +338,59 @@ export const dbService = {
   async getPayments(options: PaymentQueryOptions = {}): Promise<PaginatedResult<Payment>> {
     const { driverId, driverNumber, fromDate, toDate, status, page = 1, limit = 50 } = options;
 
-    const startDate = parseStartDate(fromDate);
-    const endDate = parseEndDate(toDate);
+    const startDate = parseStartDate(fromDate) ?? null;
+    const endDate = parseEndDate(toDate) ?? null;
+    const prisma = getPrisma();
 
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
+    const conditions: Prisma.Sql[] = [];
+    if (status) conditions.push(Prisma.sql`p.status = ${status}`);
+    if (driverId) conditions.push(Prisma.sql`p.driver_id = ${driverId}::uuid`);
+    if (driverNumber) conditions.push(Prisma.sql`d.driver_number = ${driverNumber}`);
+    conditions.push(Prisma.sql`(${startDate}::timestamptz IS NULL OR p.payment_date >= ${startDate}::timestamptz)`);
+    conditions.push(Prisma.sql`(${endDate}::timestamptz IS NULL OR p.payment_date <= ${endDate}::timestamptz)`);
 
-      const where: any = {};
-      if (status) where.status = status;
-      if (driverId) where.driverId = driverId;
+    // limit <= 0 means "every matching row" — used by the Excel exports so they
+    // are never silently truncated by an arbitrary cap.
+    const unlimited = limit <= 0;
+    const offset = unlimited ? 0 : (page - 1) * limit;
+    const pageSql = unlimited ? Prisma.empty : Prisma.sql`LIMIT ${limit} OFFSET ${offset}`;
 
-      if (driverNumber) {
-        where.driver = { driverNumber };
-      }
+    // Rows and the total count come back together, so the ledger is one round trip.
+    const rows = await prisma.$queryRaw<any[]>(Prisma.sql`
+      SELECT
+        p.id, p.driver_id, p.amount, p.payment_date, p.status, p.notes,
+        p.created_at, p.updated_at,
+        d.driver_number, d.driver_name,
+        COUNT(*) OVER () AS total_count
+      FROM payments p
+      JOIN drivers d ON d.id = p.driver_id
+      WHERE ${Prisma.join(conditions, ' AND ')}
+      ORDER BY p.payment_date DESC
+      ${pageSql}
+    `);
 
-      if (startDate || endDate) {
-        where.paymentDate = {};
-        if (startDate) where.paymentDate.gte = startDate;
-        if (endDate) where.paymentDate.lte = endDate;
-      }
+    const total = rows.length > 0 ? Number(rows[0].total_count) : 0;
 
-      const total = await prisma.payment.count({ where });
-      const list = await prisma.payment.findMany({
-        where,
-        include: { driver: true },
-        orderBy: { paymentDate: 'desc' },
-        skip: (page - 1) * limit,
-        take: limit,
-      });
-
-      const mapped: Payment[] = list.map((p: any) => ({
-        id: p.id,
-        driverId: p.driverId,
-        driverNumber: p.driver.driverNumber,
-        driverName: p.driver.driverName,
-        amount: Number(p.amount),
-        paymentDate: p.paymentDate.toISOString(),
-        status: p.status as any,
-        notes: p.notes,
-        createdAt: p.createdAt.toISOString(),
-        updatedAt: p.updatedAt.toISOString(),
-      }));
-
-      return {
-        data: mapped,
-        pagination: {
-          total,
-          page,
-          limit,
-          totalPages: Math.ceil(total / limit) || 1,
-        },
-      };
-    }
-
-    const store = loadLocalStore();
-    let payments = [...store.payments];
-
-    if (status) {
-      payments = payments.filter((p) => p.status === status);
-    }
-    if (driverId) {
-      payments = payments.filter((p) => p.driverId === driverId);
-    }
-    if (driverNumber) {
-      const driver = store.drivers.find((d) => d.driverNumber === driverNumber);
-      payments = payments.filter((p) => p.driverId === driver?.id);
-    }
-
-    if (startDate) {
-      payments = payments.filter((p) => new Date(p.paymentDate).getTime() >= startDate.getTime());
-    }
-    if (endDate) {
-      payments = payments.filter((p) => new Date(p.paymentDate).getTime() <= endDate.getTime());
-    }
-
-    payments.sort((a, b) => new Date(b.paymentDate).getTime() - new Date(a.paymentDate).getTime());
-
-    const enriched = payments.map((p) => {
-      const driver = store.drivers.find((d) => d.id === p.driverId);
-      return {
-        ...p,
-        driverNumber: driver?.driverNumber,
-        driverName: driver?.driverName,
-      };
-    });
-
-    const total = enriched.length;
-    const start = (page - 1) * limit;
-    const paged = enriched.slice(start, start + limit);
+    const data: Payment[] = rows.map((r) => ({
+      id: r.id,
+      driverId: r.driver_id,
+      driverNumber: r.driver_number,
+      driverName: r.driver_name,
+      amount: Number(r.amount),
+      paymentDate: new Date(r.payment_date).toISOString(),
+      status: r.status as any,
+      notes: r.notes,
+      createdAt: new Date(r.created_at).toISOString(),
+      updatedAt: new Date(r.updated_at).toISOString(),
+    }));
 
     return {
-      data: paged,
+      data,
       pagination: {
         total,
-        page,
-        limit,
-        totalPages: Math.ceil(total / limit) || 1,
+        page: unlimited ? 1 : page,
+        limit: unlimited ? total : limit,
+        totalPages: unlimited ? 1 : Math.ceil(total / limit) || 1,
       },
     };
   },
@@ -707,76 +402,75 @@ export const dbService = {
     notes?: string;
   }): Promise<Payment> {
     const { driverNumber, amount, paymentDate, notes } = data;
+    const prisma = getPrisma();
 
-    const driver = await this.getDriverByNumber(driverNumber);
-    if (!driver) {
-      throw new Error(`Driver #${driverNumber} does not exist in the system.`);
-    }
-    if (driver.status === 'inactive') {
-      throw new Error(`Driver #${driverNumber} (${driver.driverName}) is currently inactive.`);
+    if (!Number.isInteger(driverNumber) || driverNumber <= 0) {
+      throw new Error('Driver Number must be a valid positive number.');
     }
 
+    // Validate the amount BEFORE touching the drivers table, so a rejected
+    // submission can never register a driver as a side effect.
     const cents = toCents(amount);
     if (cents <= 0) {
       throw new Error('Payment amount must be greater than $0.00.');
     }
     const cleanAmount = centsToDollars(cents);
 
-    const recordDate = paymentDate ? new Date(paymentDate) : new Date();
-
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
-
-      const created = await prisma.payment.create({
-        data: {
-          driverId: driver.id,
-          amount: cleanAmount,
-          paymentDate: recordDate,
-          status: 'active',
-          notes: notes || null,
-        },
-        include: { driver: true },
-      });
-
-      return {
-        id: created.id,
-        driverId: created.driverId,
-        driverNumber: created.driver.driverNumber,
-        driverName: created.driver.driverName,
-        amount: Number(created.amount),
-        paymentDate: created.paymentDate.toISOString(),
-        status: created.status as any,
-        notes: created.notes,
-        createdAt: created.createdAt.toISOString(),
-        updatedAt: created.updatedAt.toISOString(),
-      };
+    const existing = await prisma.driver.findUnique({ where: { driverNumber } });
+    if (existing && existing.status === 'inactive') {
+      throw new Error(`Driver #${driverNumber} is currently inactive.`);
     }
 
-    const store = loadLocalStore();
-    const now = new Date().toISOString();
-    const newPayment: Payment = {
-      id: `pmt-${Date.now()}-${Math.random().toString(36).substr(2, 6)}`,
-      driverId: driver.id,
-      driverNumber: driver.driverNumber,
-      driverName: driver.driverName,
-      amount: cleanAmount,
-      paymentDate: recordDate.toISOString(),
-      status: 'active',
-      notes: notes || null,
-      createdAt: now,
-      updatedAt: now,
+    // The quick-payment form collects only a driver number and an amount, so an
+    // unrecognised number registers the driver rather than rejecting the payment.
+    // upsert rather than create keeps this correct if two payments for the same
+    // new driver number arrive concurrently.
+    const driver =
+      existing ??
+      (await prisma.driver.upsert({
+        where: { driverNumber },
+        update: {},
+        create: {
+          driverNumber,
+          driverName: `Driver #${driverNumber}`,
+          status: 'active',
+        },
+      }));
+
+    const recordDate = paymentDate ? new Date(paymentDate) : new Date();
+
+    const created = await prisma.payment.create({
+      data: {
+        driverId: driver.id,
+        amount: cleanAmount,
+        paymentDate: recordDate,
+        status: 'active',
+        notes: notes || null,
+      },
+      include: { driver: true },
+    });
+
+    return {
+      id: created.id,
+      driverId: created.driverId,
+      driverNumber: created.driver.driverNumber,
+      driverName: created.driver.driverName,
+      amount: Number(created.amount),
+      paymentDate: created.paymentDate.toISOString(),
+      status: created.status as any,
+      notes: created.notes,
+      createdAt: created.createdAt.toISOString(),
+      updatedAt: created.updatedAt.toISOString(),
+      driverCreated: !existing,
     };
-
-    store.payments.push(newPayment);
-    saveLocalStore(store);
-
-    return newPayment;
   },
 
   async updatePayment(
     id: string,
     data: { amount?: number; paymentDate?: string; notes?: string }
   ): Promise<Payment> {
+    const prisma = getPrisma();
+
     if (data.amount !== undefined) {
       const cents = toCents(data.amount);
       if (cents <= 0) {
@@ -784,140 +478,72 @@ export const dbService = {
       }
     }
 
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
+    const existing = await prisma.payment.findUnique({ where: { id }, include: { driver: true } });
+    if (!existing) throw new Error(`Payment ${id} not found.`);
 
-      const existing = await prisma.payment.findUnique({ where: { id }, include: { driver: true } });
-      if (!existing) throw new Error(`Payment ${id} not found.`);
-
-      const updateData: any = {
-        updatedAt: new Date(),
-      };
-
-      if (data.amount !== undefined) {
-        const cleanAmount = centsToDollars(toCents(data.amount));
-        updateData.amount = cleanAmount;
-        const auditNote = `[Amount updated from $${Number(existing.amount).toFixed(2)} to $${cleanAmount.toFixed(2)} on ${new Date().toISOString()}]`;
-        updateData.notes = data.notes !== undefined
-          ? `${data.notes} ${auditNote}`
-          : existing.notes ? `${existing.notes} ${auditNote}` : auditNote;
-      } else if (data.notes !== undefined) {
-        updateData.notes = data.notes;
-      }
-
-      if (data.paymentDate) {
-        updateData.paymentDate = new Date(data.paymentDate);
-      }
-
-      const updated = await prisma.payment.update({
-        where: { id },
-        data: updateData,
-        include: { driver: true },
-      });
-
-      return {
-        id: updated.id,
-        driverId: updated.driverId,
-        driverNumber: updated.driver.driverNumber,
-        driverName: updated.driver.driverName,
-        amount: Number(updated.amount),
-        paymentDate: updated.paymentDate.toISOString(),
-        status: updated.status as any,
-        notes: updated.notes,
-        createdAt: updated.createdAt.toISOString(),
-        updatedAt: updated.updatedAt.toISOString(),
-      };
-    }
-
-    const store = loadLocalStore();
-    const idx = store.payments.findIndex((p) => p.id === id);
-    if (idx === -1) {
-      throw new Error(`Payment ${id} not found.`);
-    }
-
-    const existing = store.payments[idx];
-    const driver = store.drivers.find((d) => d.id === existing.driverId);
-    const now = new Date().toISOString();
-
-    let updatedAmount = existing.amount;
-    let updatedNotes = existing.notes;
+    const updateData: any = {
+      updatedAt: new Date(),
+    };
 
     if (data.amount !== undefined) {
       const cleanAmount = centsToDollars(toCents(data.amount));
-      const auditNote = `[Amount updated from $${Number(existing.amount).toFixed(2)} to $${cleanAmount.toFixed(2)} on ${now}]`;
-      updatedAmount = cleanAmount;
-      updatedNotes = data.notes !== undefined
+      updateData.amount = cleanAmount;
+      const auditNote = `[Amount updated from $${Number(existing.amount).toFixed(2)} to $${cleanAmount.toFixed(2)} on ${new Date().toISOString()}]`;
+      updateData.notes = data.notes !== undefined
         ? `${data.notes} ${auditNote}`
         : existing.notes ? `${existing.notes} ${auditNote}` : auditNote;
     } else if (data.notes !== undefined) {
-      updatedNotes = data.notes;
+      updateData.notes = data.notes;
     }
 
-    const updatedPayment: Payment = {
-      ...existing,
-      amount: updatedAmount,
-      paymentDate: data.paymentDate ? new Date(data.paymentDate).toISOString() : existing.paymentDate,
-      notes: updatedNotes,
-      updatedAt: now,
-      driverNumber: driver?.driverNumber,
-      driverName: driver?.driverName,
+    if (data.paymentDate) {
+      updateData.paymentDate = new Date(data.paymentDate);
+    }
+
+    const updated = await prisma.payment.update({
+      where: { id },
+      data: updateData,
+      include: { driver: true },
+    });
+
+    return {
+      id: updated.id,
+      driverId: updated.driverId,
+      driverNumber: updated.driver.driverNumber,
+      driverName: updated.driver.driverName,
+      amount: Number(updated.amount),
+      paymentDate: updated.paymentDate.toISOString(),
+      status: updated.status as any,
+      notes: updated.notes,
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString(),
     };
-
-    store.payments[idx] = updatedPayment;
-    saveLocalStore(store);
-
-    return updatedPayment;
   },
 
   async voidPayment(id: string, reason?: string): Promise<Payment> {
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
+    const prisma = getPrisma();
 
-      const updated = await prisma.payment.update({
-        where: { id },
-        data: {
-          status: 'voided',
-          notes: reason ? `VOIDED: ${reason}` : undefined,
-        },
-        include: { driver: true },
-      });
-
-      return {
-        id: updated.id,
-        driverId: updated.driverId,
-        driverNumber: updated.driver.driverNumber,
-        driverName: updated.driver.driverName,
-        amount: Number(updated.amount),
-        paymentDate: updated.paymentDate.toISOString(),
+    const updated = await prisma.payment.update({
+      where: { id },
+      data: {
         status: 'voided',
-        notes: updated.notes,
-        createdAt: updated.createdAt.toISOString(),
-        updatedAt: updated.updatedAt.toISOString(),
-      };
-    }
+        notes: reason ? `VOIDED: ${reason}` : undefined,
+      },
+      include: { driver: true },
+    });
 
-    const store = loadLocalStore();
-    const idx = store.payments.findIndex((p) => p.id === id);
-    if (idx === -1) {
-      throw new Error(`Payment ${id} not found.`);
-    }
-
-    const existing = store.payments[idx];
-    const driver = store.drivers.find((d) => d.id === existing.driverId);
-
-    const voidedPayment: Payment = {
-      ...existing,
+    return {
+      id: updated.id,
+      driverId: updated.driverId,
+      driverNumber: updated.driver.driverNumber,
+      driverName: updated.driver.driverName,
+      amount: Number(updated.amount),
+      paymentDate: updated.paymentDate.toISOString(),
       status: 'voided',
-      notes: reason ? `VOIDED: ${reason}` : existing.notes,
-      updatedAt: new Date().toISOString(),
-      driverNumber: driver?.driverNumber,
-      driverName: driver?.driverName,
+      notes: updated.notes,
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString(),
     };
-
-    store.payments[idx] = voidedPayment;
-    saveLocalStore(store);
-
-    return voidedPayment;
   },
 
   // -------------------------------------------------------------
@@ -925,82 +551,47 @@ export const dbService = {
   // -------------------------------------------------------------
 
   async getDashboardStats(fromDate?: string, toDate?: string): Promise<DashboardStats> {
-    const startDate = parseStartDate(fromDate);
-    const endDate = parseEndDate(toDate);
+    const startDate = parseStartDate(fromDate) ?? null;
+    const endDate = parseEndDate(toDate) ?? null;
+    const prisma = getPrisma();
 
-    if (getDataBackendMode() === 'postgres') {
-      assertPostgresConfigured();
+    // "Today" is resolved here rather than in SQL so it stays the server's local
+    // day, matching isToday(), instead of the database's UTC day.
+    const now = new Date();
+    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
+    const todayEnd = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
 
-      const totalDrivers = await prisma.driver.count();
-      const activeDrivers = await prisma.driver.count({ where: { status: 'active' } });
+    const inPeriod = Prisma.sql`
+      (${startDate}::timestamptz IS NULL OR payment_date >= ${startDate}::timestamptz)
+      AND (${endDate}::timestamptz IS NULL OR payment_date <= ${endDate}::timestamptz)`;
+    const isToday_ = Prisma.sql`payment_date >= ${todayStart}::timestamptz AND payment_date <= ${todayEnd}::timestamptz`;
 
-      const allActivePayments = await prisma.payment.findMany({
-        where: { status: 'active' },
-        select: { id: true, driverId: true, amount: true, paymentDate: true },
-      });
+    // Every figure on the dashboard in a single round trip.
+    const [row] = await prisma.$queryRaw<any[]>(Prisma.sql`
+      SELECT
+        (SELECT COUNT(*) FROM drivers) AS total_drivers,
+        (SELECT COUNT(*) FROM drivers WHERE status = 'active') AS active_drivers,
+        COUNT(*) FILTER (WHERE ${isToday_}) AS payments_today_count,
+        COALESCE(SUM(amount) FILTER (WHERE ${isToday_}), 0) AS payments_today_amount,
+        COALESCE(SUM(amount), 0) AS total_paid_amount,
+        COALESCE(SUM(amount) FILTER (WHERE ${inPeriod}), 0) AS period_paid_amount,
+        COUNT(*) FILTER (WHERE ${inPeriod}) AS period_payments_count,
+        COUNT(DISTINCT driver_id) FILTER (WHERE ${inPeriod}) AS period_paid_drivers_count
+      FROM payments
+      WHERE status = 'active'
+    `);
 
-      const todayPayments = allActivePayments.filter((p: any) => isToday(p.paymentDate.toISOString()));
-      const paymentsTodayCount = todayPayments.length;
-      const paymentsTodayCents = todayPayments.reduce((sum: number, p: any) => sum + toCents(Number(p.amount)), 0);
-
-      const totalPaidCents = allActivePayments.reduce((sum: number, p: any) => sum + toCents(Number(p.amount)), 0);
-
-      let periodPayments = allActivePayments;
-      if (startDate) {
-        periodPayments = periodPayments.filter((p: any) => new Date(p.paymentDate).getTime() >= startDate.getTime());
-      }
-      if (endDate) {
-        periodPayments = periodPayments.filter((p: any) => new Date(p.paymentDate).getTime() <= endDate.getTime());
-      }
-
-      const periodPaidCents = periodPayments.reduce((sum: number, p: any) => sum + toCents(Number(p.amount)), 0);
-      const uniqueDriversInPeriod = new Set(periodPayments.map((p: any) => p.driverId)).size;
-
-      return {
-        totalDrivers,
-        activeDrivers,
-        paymentsTodayCount,
-        paymentsTodayAmount: centsToDollars(paymentsTodayCents),
-        totalPaidAmount: centsToDollars(totalPaidCents),
-        periodPaidAmount: centsToDollars(periodPaidCents),
-        periodPaymentsCount: periodPayments.length,
-        periodPaidDriversCount: uniqueDriversInPeriod,
-      };
-    }
-
-    const store = loadLocalStore();
-    const drivers = store.drivers;
-    const activePayments = store.payments.filter((p: Payment) => p.status === 'active');
-
-    const totalDrivers = drivers.length;
-    const activeDrivers = drivers.filter((d: Driver) => d.status === 'active').length;
-
-    const todayPayments = activePayments.filter((p: Payment) => isToday(p.paymentDate));
-    const paymentsTodayCount = todayPayments.length;
-    const paymentsTodayCents = todayPayments.reduce((sum: number, p: Payment) => sum + toCents(p.amount), 0);
-
-    const totalPaidCents = activePayments.reduce((sum: number, p: Payment) => sum + toCents(p.amount), 0);
-
-    let periodPayments = activePayments;
-    if (startDate) {
-      periodPayments = periodPayments.filter((p: Payment) => new Date(p.paymentDate).getTime() >= startDate.getTime());
-    }
-    if (endDate) {
-      periodPayments = periodPayments.filter((p: Payment) => new Date(p.paymentDate).getTime() <= endDate.getTime());
-    }
-
-    const periodPaidCents = periodPayments.reduce((sum: number, p: Payment) => sum + toCents(p.amount), 0);
-    const uniqueDriversInPeriod = new Set(periodPayments.map((p: Payment) => p.driverId)).size;
+    const money = (v: any) => centsToDollars(toCents(Number(v ?? 0)));
 
     return {
-      totalDrivers,
-      activeDrivers,
-      paymentsTodayCount,
-      paymentsTodayAmount: centsToDollars(paymentsTodayCents),
-      totalPaidAmount: centsToDollars(totalPaidCents),
-      periodPaidAmount: centsToDollars(periodPaidCents),
-      periodPaymentsCount: periodPayments.length,
-      periodPaidDriversCount: uniqueDriversInPeriod,
+      totalDrivers: Number(row.total_drivers),
+      activeDrivers: Number(row.active_drivers),
+      paymentsTodayCount: Number(row.payments_today_count),
+      paymentsTodayAmount: money(row.payments_today_amount),
+      totalPaidAmount: money(row.total_paid_amount),
+      periodPaidAmount: money(row.period_paid_amount),
+      periodPaymentsCount: Number(row.period_payments_count),
+      periodPaidDriversCount: Number(row.period_paid_drivers_count),
     };
   },
 };

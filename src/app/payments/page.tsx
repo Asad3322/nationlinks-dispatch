@@ -66,7 +66,11 @@ export default function PaymentsLedgerPage() {
       const params = new URLSearchParams();
       if (fromDate) params.set('fromDate', fromDate);
       if (toDate) params.set('toDate', toDate);
-      params.set('limit', '10000');
+      // Export exactly what the current filters show; with no filters set, that
+      // is every record.
+      const exportDriverNum = parseInt(driverSearch.trim(), 10);
+      if (!isNaN(exportDriverNum)) params.set('driverNumber', String(exportDriverNum));
+      params.set('limit', 'all');
 
       const res = await fetch(`/api/payments?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to load payments for export');
@@ -189,7 +193,6 @@ export default function PaymentsLedgerPage() {
               <tr className="border-b border-slate-200 bg-slate-50/70 text-slate-700 text-xs font-semibold uppercase tracking-wider">
                 <th className="py-3 px-4">Date</th>
                 <th className="py-3 px-4">Driver #</th>
-                <th className="py-3 px-4">Driver Name</th>
                 <th className="py-3 px-4 text-right">Amount</th>
                 <th className="py-3 px-4 text-center">Status</th>
                 <th className="py-3 px-4">Audit / Notes</th>
@@ -199,7 +202,7 @@ export default function PaymentsLedgerPage() {
             <tbody className="divide-y divide-slate-100">
               {isLoading ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-500">
+                  <td colSpan={6} className="py-12 text-center text-slate-500">
                     <div className="flex flex-col items-center justify-center space-y-2">
                       <div className="w-6 h-6 border-2 border-slate-900 border-t-transparent rounded-full animate-spin" />
                       <span className="text-xs font-medium text-slate-500">Loading ledger...</span>
@@ -208,7 +211,7 @@ export default function PaymentsLedgerPage() {
                 </tr>
               ) : payments.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-12 text-center text-slate-500">
+                  <td colSpan={6} className="py-12 text-center text-slate-500">
                     <p className="text-sm font-semibold text-slate-700">No payment transactions found.</p>
                   </td>
                 </tr>
@@ -226,11 +229,8 @@ export default function PaymentsLedgerPage() {
                         {formatDisplayDate(p.paymentDate)}
                       </td>
                       <td className="py-3 px-4 font-mono font-medium text-slate-900 whitespace-nowrap">
-                        #{p.driverNumber}
-                      </td>
-                      <td className="py-3 px-4 text-slate-900 font-medium whitespace-nowrap">
                         <Link href={`/drivers/${p.driverId}`} className="hover:underline">
-                          {p.driverName || 'N/A'}
+                          #{p.driverNumber}
                         </Link>
                       </td>
                       <td

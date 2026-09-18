@@ -1,13 +1,14 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Search, Calendar, FileSpreadsheet, UserPlus, RefreshCw, X } from 'lucide-react';
+import { Search, Calendar, FileSpreadsheet, RefreshCw, X } from 'lucide-react';
 import { Driver } from '@/lib/types';
 import DriverTable from '@/components/drivers/DriverTable';
 import DriverModal from '@/components/drivers/DriverModal';
 import ConfirmationModal from '@/components/common/ConfirmationModal';
 import Pagination from '@/components/common/Pagination';
 import { exportPaymentsToExcel } from '@/lib/export';
+import { formatCurrency } from '@/lib/currency';
 import { toast } from 'sonner';
 
 export default function DriverPaymentPage() {
@@ -23,6 +24,7 @@ export default function DriverPaymentPage() {
   // -------------------------------------------------------------
   const [drivers, setDrivers] = useState<Driver[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [search, setSearch] = useState<string>('');
   const [fromDate, setFromDate] = useState<string>('');
   const [toDate, setToDate] = useState<string>('');
@@ -42,7 +44,7 @@ export default function DriverPaymentPage() {
 
   // Action / Confirmation modal state
   const [confirmTargetDriver, setConfirmTargetDriver] = useState<Driver | null>(null);
-  const [confirmMode, setConfirmMode] = useState<'delete' | 'deactivate' | 'activate'>('deactivate');
+  const [confirmMode, setConfirmMode] = useState<'delete' | 'deactivate' | 'activate' | 'forceDelete'>('deactivate');
   const [isConfirmLoading, setIsConfirmLoading] = useState<boolean>(false);
 
   // -------------------------------------------------------------
@@ -61,14 +63,21 @@ export default function DriverPaymentPage() {
       params.set('limit', String(pageSize));
 
       const res = await fetch(`/api/drivers?${params.toString()}`);
-      if (!res.ok) throw new Error('Failed to load drivers');
+      const data = await res.json().catch(() => ({}));
+      // Surface the server's real reason (e.g. database unreachable) so a failed
+      // load is never mistaken for an empty driver list.
+      if (!res.ok) throw new Error(data.error || 'Failed to load drivers');
 
-      const data = await res.json();
       setDrivers(data.data || []);
       setTotalItems(data.pagination?.total || 0);
       setTotalPages(data.pagination?.totalPages || 1);
+      setLoadError(null);
     } catch (err: any) {
       console.error(err);
+      setDrivers([]);
+      setTotalItems(0);
+      setTotalPages(1);
+      setLoadError(err.message || 'Error loading drivers');
       toast.error(err.message || 'Error loading drivers');
     } finally {
       setIsLoading(false);
@@ -126,7 +135,15 @@ export default function DriverPaymentPage() {
         throw new Error(data.error || 'Failed to process payment');
       }
 
-      toast.success(`Payment of $${parsedAmount.toFixed(2)} recorded for Driver #${parsedNum}!`);
+      // Registering a new driver is a side effect worth surfacing, so a typo in
+      // the driver number is obvious rather than silently creating a driver.
+      if (data.driverCreated) {
+        toast.success(
+          `Driver #${parsedNum} registered and payment of $${parsedAmount.toFixed(2)} recorded.`
+        );
+      } else {
+        toast.success(`Payment of $${parsedAmount.toFixed(2)} recorded for Driver #${parsedNum}!`);
+      }
 
       // Reset form
       setDriverNumberInput('');
@@ -172,12 +189,27 @@ export default function DriverPaymentPage() {
     }
   };
 
+  // Permanently remove a driver and any payment history they have.
+  const handleOpenForceDelete = (driver: Driver) => {
+    setConfirmTargetDriver(driver);
+    setConfirmMode('forceDelete');
+  };
+
   const handleConfirmDriverAction = async () => {
     if (!confirmTargetDriver) return;
     setIsConfirmLoading(true);
 
     try {
-      if (confirmMode === 'delete') {
+      if (confirmMode === 'forceDelete') {
+        // force=true also removes the driver's payments.
+        const res = await fetch(`/api/drivers/${confirmTargetDriver.id}?force=true`, {
+          method: 'DELETE',
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to delete driver');
+
+        toast.success(data.message || `Driver #${confirmTargetDriver.driverNumber} deleted.`);
+      } else if (confirmMode === 'delete') {
         // Hard Delete (zero payments)
         const res = await fetch(`/api/drivers/${confirmTargetDriver.id}`, {
           method: 'DELETE',
@@ -196,7 +228,7 @@ export default function DriverPaymentPage() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Failed to deactivate driver');
 
-        toast.success(`Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName}) has been deactivated.`);
+        toast.success(`Driver #${confirmTargetDriver.driverNumber} has been deactivated.`);
       } else if (confirmMode === 'activate') {
         // Reactivate
         const res = await fetch(`/api/drivers/${confirmTargetDriver.id}`, {
@@ -207,7 +239,7 @@ export default function DriverPaymentPage() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Failed to reactivate driver');
 
-        toast.success(`Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName}) is now Active.`);
+        toast.success(`Driver #${confirmTargetDriver.driverNumber} is now Active.`);
       }
 
       setConfirmTargetDriver(null);
@@ -228,7 +260,8 @@ export default function DriverPaymentPage() {
       const params = new URLSearchParams();
       if (fromDate) params.set('fromDate', fromDate);
       if (toDate) params.set('toDate', toDate);
-      params.set('limit', '10000'); // Export all within range
+      // No date filter selected means export every record, not just a page.
+      params.set('limit', 'all');
 
       const res = await fetch(`/api/payments?${params.toString()}`);
       if (!res.ok) throw new Error('Failed to fetch payment records for export');
@@ -324,7 +357,7 @@ export default function DriverPaymentPage() {
 
         {/* Clean Controls Toolbar Directly Below Payment Form */}
         <div className="pt-2 border-t border-slate-100 space-y-3">
-          {/* Search and Add Driver Row */}
+          {/* Search Row */}
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
             {/* Search Driver */}
             <div className="relative flex-1">
@@ -336,7 +369,7 @@ export default function DriverPaymentPage() {
                   setSearch(e.target.value);
                   setCurrentPage(1);
                 }}
-                placeholder="Search Driver (Number or Name)..."
+                placeholder="Search Driver Number..."
                 className="w-full pl-9 pr-8 py-2 bg-slate-50 border border-slate-200 rounded-lg text-xs sm:text-sm text-slate-900 placeholder:text-slate-400 focus:bg-white focus:outline-none focus:ring-2 focus:ring-slate-900 focus:border-transparent transition-all"
               />
               {search && (
@@ -349,18 +382,6 @@ export default function DriverPaymentPage() {
               )}
             </div>
 
-            {/* + Add Driver Button */}
-            <button
-              onClick={() => {
-                setEditingDriver(null);
-                setIsDriverModalOpen(true);
-              }}
-              className="inline-flex items-center justify-center px-3.5 py-2 bg-slate-100 hover:bg-slate-200 text-slate-900 text-xs sm:text-sm font-semibold rounded-lg border border-slate-200 transition-colors shrink-0"
-              title="Add a new driver"
-            >
-              <UserPlus className="w-4 h-4 mr-1.5 text-slate-700" />
-              <span>+ Add Driver</span>
-            </button>
           </div>
 
           {/* Date Filter & Export Row */}
@@ -431,6 +452,7 @@ export default function DriverPaymentPage() {
           <DriverTable
             drivers={drivers}
             isLoading={isLoading}
+            loadError={loadError}
             sortBy={sortBy}
             sortOrder={sortOrder}
             onSort={handleSort}
@@ -439,6 +461,7 @@ export default function DriverPaymentPage() {
               setIsDriverModalOpen(true);
             }}
             onDeleteOrDeactivate={handleOpenDeleteOrDeactivate}
+            onForceDelete={handleOpenForceDelete}
           />
 
           {/* Pagination */}
@@ -473,27 +496,37 @@ export default function DriverPaymentPage() {
         <ConfirmationModal
           isOpen={!!confirmTargetDriver}
           title={
-            confirmMode === 'delete'
+            confirmMode === 'forceDelete'
+              ? `Permanently Delete Driver #${confirmTargetDriver.driverNumber}?`
+              : confirmMode === 'delete'
               ? `Permanently Delete Driver #${confirmTargetDriver.driverNumber}?`
               : confirmMode === 'deactivate'
               ? `Deactivate Driver #${confirmTargetDriver.driverNumber}?`
               : `Reactivate Driver #${confirmTargetDriver.driverNumber}?`
           }
           message={
-            confirmMode === 'delete'
-              ? `Are you sure you want to permanently delete Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName})? This driver has zero payment history. This action cannot be undone.`
+            confirmMode === 'forceDelete'
+              ? (confirmTargetDriver.paymentCount || 0) > 0
+                ? `This permanently deletes Driver #${confirmTargetDriver.driverNumber} AND all ${confirmTargetDriver.paymentCount} of their payment record(s), totalling ${formatCurrency(confirmTargetDriver.totalPaid || 0)}. The financial history will be gone and this cannot be undone. To keep the records instead, cancel and choose Deactivate.`
+                : `Are you sure you want to permanently delete Driver #${confirmTargetDriver.driverNumber}? This cannot be undone.`
+              : confirmMode === 'delete'
+              ? `Are you sure you want to permanently delete Driver #${confirmTargetDriver.driverNumber}? This driver has zero payment history. This action cannot be undone.`
               : confirmMode === 'deactivate'
-              ? `Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName}) has payment history and cannot be permanently deleted. Deactivating will preserve all financial statements and records while preventing future payments.`
-              : `Are you sure you want to reactivate Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName})? They will immediately be eligible to receive payments.`
+              ? `Driver #${confirmTargetDriver.driverNumber} has payment history and cannot be permanently deleted. Deactivating will preserve all financial statements and records while preventing future payments.`
+              : `Are you sure you want to reactivate Driver #${confirmTargetDriver.driverNumber}? They will immediately be eligible to receive payments.`
           }
           confirmLabel={
-            confirmMode === 'delete'
+            confirmMode === 'forceDelete'
+              ? (confirmTargetDriver.paymentCount || 0) > 0
+                ? 'Delete Driver & Payments'
+                : 'Delete Driver'
+              : confirmMode === 'delete'
               ? 'Delete Driver'
               : confirmMode === 'deactivate'
               ? 'Deactivate Driver'
               : 'Reactivate Driver'
           }
-          isDestructive={confirmMode === 'delete' || confirmMode === 'deactivate'}
+          isDestructive={confirmMode !== 'activate'}
           isLoading={isConfirmLoading}
           onConfirm={handleConfirmDriverAction}
           onCancel={() => setConfirmTargetDriver(null)}

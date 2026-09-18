@@ -78,7 +78,7 @@ export default function PaymentVoidModal({
             Are you sure you want to void this{' '}
             <strong className="text-slate-900 font-bold">{formatCurrency(payment.amount)}</strong> payment for{' '}
             <strong className="text-slate-900 font-bold">Driver #{payment.driverNumber || payment.driverId}</strong>
-            {payment.driverName ? ` (${payment.driverName})` : ''}?
+            ?
           </p>
 
           <p className="text-xs text-slate-500 bg-slate-50 p-3 rounded-lg border border-slate-200">

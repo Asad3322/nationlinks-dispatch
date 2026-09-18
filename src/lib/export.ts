@@ -8,14 +8,13 @@ interface ExportPaymentsOptions {
   fromDate?: string;
   toDate?: string;
   driverNumber?: number;
-  driverName?: string;
 }
 
 /**
  * Generates and triggers download of a real Excel (.xlsx) statement spreadsheet
  */
 export function exportPaymentsToExcel(options: ExportPaymentsOptions): void {
-  const { payments, fromDate, toDate, driverNumber, driverName } = options;
+  const { payments, fromDate, toDate, driverNumber } = options;
 
   // Filter out voided payments for total calculation, but include records with status clearly labeled
   const activePayments = payments.filter((p) => p.status === 'active');
@@ -33,7 +32,7 @@ export function exportPaymentsToExcel(options: ExportPaymentsOptions): void {
 
   // Header Title
   const title = driverNumber
-    ? `NationLinks Dispatch - Driver #${driverNumber} (${driverName || 'Statement'})`
+    ? `NationLinks Dispatch - Driver #${driverNumber} Statement`
     : 'NationLinks Dispatch - Payment Statement';
 
   const rows: any[][] = [
@@ -42,14 +41,13 @@ export function exportPaymentsToExcel(options: ExportPaymentsOptions): void {
     [dateRangeLabel],
     ['Generated at: ' + new Date().toLocaleString()],
     [], // Blank line
-    ['Driver #', 'Driver Name', 'Payment Date', 'Amount ($)', 'Status'],
+    ['Driver #', 'Payment Date', 'Amount ($)', 'Status'],
   ];
 
   // Data rows
   payments.forEach((p) => {
     rows.push([
       p.driverNumber ?? 'N/A',
-      p.driverName ?? 'N/A',
       formatDisplayDate(p.paymentDate),
       Number(p.amount).toFixed(2),
       p.status === 'active' ? 'Active' : 'Voided',
@@ -61,7 +59,6 @@ export function exportPaymentsToExcel(options: ExportPaymentsOptions): void {
   rows.push([
     'Total Active Payments',
     '',
-    '',
     `$${totalDollars.toFixed(2)}`,
     `(${activePayments.length} active payments)`,
   ]);
@@ -72,7 +69,6 @@ export function exportPaymentsToExcel(options: ExportPaymentsOptions): void {
   // Auto-fit column widths
   worksheet['!cols'] = [
     { wch: 12 }, // Driver #
-    { wch: 24 }, // Driver Name
     { wch: 22 }, // Payment Date
     { wch: 16 }, // Amount
     { wch: 14 }, // Status

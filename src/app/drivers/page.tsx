@@ -1,13 +1,14 @@
 'use client';
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { Users, UserPlus, CheckCircle, ShieldAlert } from 'lucide-react';
+import { Users, CheckCircle, ShieldAlert } from 'lucide-react';
 import { Driver, DriverStatus } from '@/lib/types';
 import DriverSearchBar from '@/components/drivers/DriverSearchBar';
 import DriverTable from '@/components/drivers/DriverTable';
 import DriverModal from '@/components/drivers/DriverModal';
 import Pagination from '@/components/common/Pagination';
 import ConfirmationModal from '@/components/common/ConfirmationModal';
+import { formatCurrency } from '@/lib/currency';
 import { toast } from 'sonner';
 
 export default function DriversPage() {
@@ -81,12 +82,7 @@ export default function DriversPage() {
     setCurrentPage(1);
   };
 
-  // Add / Edit Driver Handlers
-  const handleOpenAddModal = () => {
-    setEditingDriver(null);
-    setIsDriverModalOpen(true);
-  };
-
+  // Edit Driver Handler
   const handleOpenEditModal = (driver: Driver) => {
     setEditingDriver(driver);
     setIsDriverModalOpen(true);
@@ -99,7 +95,7 @@ export default function DriversPage() {
 
   // Delete / Deactivate / Reactivate Driver Handlers
   const [confirmTargetDriver, setConfirmTargetDriver] = useState<Driver | null>(null);
-  const [confirmMode, setConfirmMode] = useState<'delete' | 'deactivate' | 'activate'>('deactivate');
+  const [confirmMode, setConfirmMode] = useState<'delete' | 'deactivate' | 'activate' | 'forceDelete'>('deactivate');
   const [isConfirmLoading, setIsConfirmLoading] = useState<boolean>(false);
 
   const handleOpenDeleteOrDeactivate = (driver: Driver) => {
@@ -115,12 +111,27 @@ export default function DriversPage() {
     }
   };
 
+  // Permanently remove a driver and any payment history they have.
+  const handleOpenForceDelete = (driver: Driver) => {
+    setConfirmTargetDriver(driver);
+    setConfirmMode('forceDelete');
+  };
+
   const handleConfirmDriverAction = async () => {
     if (!confirmTargetDriver) return;
     setIsConfirmLoading(true);
 
     try {
-      if (confirmMode === 'delete') {
+      if (confirmMode === 'forceDelete') {
+        // force=true also removes the driver's payments.
+        const res = await fetch(`/api/drivers/${confirmTargetDriver.id}?force=true`, {
+          method: 'DELETE',
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error || 'Failed to delete driver');
+
+        toast.success(data.message || `Driver #${confirmTargetDriver.driverNumber} deleted.`);
+      } else if (confirmMode === 'delete') {
         const res = await fetch(`/api/drivers/${confirmTargetDriver.id}`, {
           method: 'DELETE',
         });
@@ -135,7 +146,7 @@ export default function DriversPage() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Failed to deactivate driver');
-        toast.success(`Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName}) has been deactivated.`);
+        toast.success(`Driver #${confirmTargetDriver.driverNumber} has been deactivated.`);
       } else if (confirmMode === 'activate') {
         const res = await fetch(`/api/drivers/${confirmTargetDriver.id}`, {
           method: 'PATCH',
@@ -144,7 +155,7 @@ export default function DriversPage() {
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Failed to reactivate driver');
-        toast.success(`Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName}) is now Active.`);
+        toast.success(`Driver #${confirmTargetDriver.driverNumber} is now Active.`);
       }
 
       setConfirmTargetDriver(null);
@@ -168,14 +179,6 @@ export default function DriversPage() {
             Manage dispatch drivers, view statements, update statuses, and monitor accounts.
           </p>
         </div>
-
-        <button
-          onClick={handleOpenAddModal}
-          className="inline-flex items-center px-4 py-2 bg-slate-900 hover:bg-black text-white text-sm font-semibold rounded-lg shadow-xs transition-colors"
-        >
-          <UserPlus className="w-4 h-4 mr-2 text-emerald-400" />
-          <span>Add New Driver</span>
-        </button>
       </div>
 
       {/* Driver Search and Filter Controls */}
@@ -184,7 +187,6 @@ export default function DriversPage() {
         onSearchChange={handleSearchChange}
         statusFilter={statusFilter}
         onStatusFilterChange={handleStatusFilterChange}
-        onAddDriverClick={handleOpenAddModal}
         totalDriversCount={totalItems}
       />
 
@@ -197,6 +199,7 @@ export default function DriversPage() {
         onSort={(col) => handleSort(col as any)}
         onEditDriver={handleOpenEditModal}
         onDeleteOrDeactivate={handleOpenDeleteOrDeactivate}
+        onForceDelete={handleOpenForceDelete}
       />
 
       {/* Pagination Controls */}
@@ -213,7 +216,7 @@ export default function DriversPage() {
         disabled={isLoading}
       />
 
-      {/* Add / Edit Driver Modal */}
+      {/* Edit Driver Modal */}
       <DriverModal
         isOpen={isDriverModalOpen}
         driver={editingDriver}
@@ -226,27 +229,37 @@ export default function DriversPage() {
         <ConfirmationModal
           isOpen={!!confirmTargetDriver}
           title={
-            confirmMode === 'delete'
+            confirmMode === 'forceDelete'
+              ? `Permanently Delete Driver #${confirmTargetDriver.driverNumber}?`
+              : confirmMode === 'delete'
               ? `Permanently Delete Driver #${confirmTargetDriver.driverNumber}?`
               : confirmMode === 'deactivate'
               ? `Deactivate Driver #${confirmTargetDriver.driverNumber}?`
               : `Reactivate Driver #${confirmTargetDriver.driverNumber}?`
           }
           message={
-            confirmMode === 'delete'
-              ? `Are you sure you want to permanently delete Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName})? This driver has zero payment history. This action cannot be undone.`
+            confirmMode === 'forceDelete'
+              ? (confirmTargetDriver.paymentCount || 0) > 0
+                ? `This permanently deletes Driver #${confirmTargetDriver.driverNumber} AND all ${confirmTargetDriver.paymentCount} of their payment record(s), totalling ${formatCurrency(confirmTargetDriver.totalPaid || 0)}. The financial history will be gone and this cannot be undone. To keep the records instead, cancel and choose Deactivate.`
+                : `Are you sure you want to permanently delete Driver #${confirmTargetDriver.driverNumber}? This cannot be undone.`
+              : confirmMode === 'delete'
+              ? `Are you sure you want to permanently delete Driver #${confirmTargetDriver.driverNumber}? This driver has zero payment history. This action cannot be undone.`
               : confirmMode === 'deactivate'
-              ? `Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName}) has payment history and cannot be permanently deleted. Deactivating will preserve all financial statements and records while preventing future payments.`
-              : `Are you sure you want to reactivate Driver #${confirmTargetDriver.driverNumber} (${confirmTargetDriver.driverName})? They will immediately be eligible to receive payments.`
+              ? `Driver #${confirmTargetDriver.driverNumber} has payment history and cannot be permanently deleted. Deactivating will preserve all financial statements and records while preventing future payments.`
+              : `Are you sure you want to reactivate Driver #${confirmTargetDriver.driverNumber}? They will immediately be eligible to receive payments.`
           }
           confirmLabel={
-            confirmMode === 'delete'
+            confirmMode === 'forceDelete'
+              ? (confirmTargetDriver.paymentCount || 0) > 0
+                ? 'Delete Driver & Payments'
+                : 'Delete Driver'
+              : confirmMode === 'delete'
               ? 'Delete Driver'
               : confirmMode === 'deactivate'
               ? 'Deactivate Driver'
               : 'Reactivate Driver'
           }
-          isDestructive={confirmMode === 'delete' || confirmMode === 'deactivate'}
+          isDestructive={confirmMode !== 'activate'}
           isLoading={isConfirmLoading}
           onConfirm={handleConfirmDriverAction}
           onCancel={() => setConfirmTargetDriver(null)}

@@ -25,6 +25,8 @@ export interface Payment {
   notes?: string | null;
   createdAt: string;
   updatedAt: string;
+  // True when this payment registered a previously unknown driver number.
+  driverCreated?: boolean;
 }
 
 export interface DashboardStats {

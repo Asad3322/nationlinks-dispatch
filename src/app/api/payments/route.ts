@@ -11,7 +11,9 @@ export async function GET(request: NextRequest) {
     const toDate = searchParams.get('toDate') || undefined;
     const status = (searchParams.get('status') as any) || undefined;
     const page = parseInt(searchParams.get('page') || '1', 10);
-    const limit = parseInt(searchParams.get('limit') || '50', 10);
+    // limit=all returns every matching record (used by the Excel exports).
+    const limitParam = searchParams.get('limit') || '50';
+    const limit = limitParam === 'all' ? 0 : parseInt(limitParam, 10);
 
     const result = await dbService.getPayments({
       driverId,

@@ -7,9 +7,15 @@
     "build": "next build --webpack",
     "start": "next start",
     "lint": "eslint src",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "db:generate": "prisma generate",
+    "db:push": "node --env-file=.env.local ./node_modules/prisma/build/index.js db push",
+    "db:studio": "node --env-file=.env.local ./node_modules/prisma/build/index.js studio",
+    "db:verify": "tsx --env-file=.env.local scripts/verify-supabase.ts",
+    "postinstall": "prisma generate"
   },
   "dependencies": {
+    "@prisma/client": "^6.19.3",
     "@supabase/supabase-js": "^2.48.1",
     "clsx": "^2.1.1",
     "lucide-react": "^1.16.0",
@@ -27,6 +33,7 @@
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.2.6",
+    "prisma": "^6.19.3",
     "tailwindcss": "^4",
     "tsx": "^4.22.3",
     "typescript": "^5"

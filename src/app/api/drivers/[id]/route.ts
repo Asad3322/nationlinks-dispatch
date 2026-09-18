@@ -33,11 +33,14 @@ export async function PATCH(
     const { driverName, status, driverNumber } = body;
 
     const updatePayload: any = {};
+    // An empty name resets the driver to its number-derived label rather than
+    // being rejected, since names are optional.
     if (driverName !== undefined) {
-      if (!driverName.trim()) {
-        return NextResponse.json({ error: 'Driver name cannot be empty' }, { status: 400 });
-      }
-      updatePayload.driverName = driverName.trim();
+      updatePayload.driverName =
+        typeof driverName === 'string' && driverName.trim()
+          ? driverName.trim()
+          : `Driver #${parseInt(String(driverNumber ?? ''), 10) || ''}`.trim();
+      if (updatePayload.driverName === 'Driver #') delete updatePayload.driverName;
     }
 
     if (status !== undefined) {
@@ -73,7 +76,10 @@ export async function DELETE(
 ) {
   try {
     const { id } = await params;
-    const result = await dbService.deleteDriver(id);
+    // ?force=true also deletes the driver's payment history. Without it the
+    // driver is deactivated when payments exist, preserving the audit trail.
+    const force = new URL(request.url).searchParams.get('force') === 'true';
+    const result = await dbService.deleteDriver(id, { force });
     return NextResponse.json(result);
   } catch (error: any) {
     console.error('API /api/drivers/[id] DELETE error:', error);

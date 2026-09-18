@@ -9,21 +9,25 @@ import { formatCurrency } from '@/lib/currency';
 interface DriverTableProps {
   drivers: Driver[];
   isLoading: boolean;
+  loadError?: string | null;
   sortBy: 'driverNumber' | 'driverName' | 'totalPaid';
   sortOrder: 'asc' | 'desc';
   onSort: (column: 'driverNumber' | 'driverName' | 'totalPaid') => void;
   onEditDriver: (driver: Driver) => void;
   onDeleteOrDeactivate: (driver: Driver) => void;
+  onForceDelete: (driver: Driver) => void;
 }
 
 export default function DriverTable({
   drivers,
   isLoading,
+  loadError = null,
   sortBy,
   sortOrder,
   onSort,
   onEditDriver,
   onDeleteOrDeactivate,
+  onForceDelete,
 }: DriverTableProps) {
   const renderSortIcon = (column: 'driverNumber' | 'driverName' | 'totalPaid') => {
     if (sortBy !== column) {
@@ -55,18 +59,6 @@ export default function DriverTable({
                 </div>
               </th>
 
-              {/* Driver Name Column */}
-              <th
-                scope="col"
-                onClick={() => onSort('driverName')}
-                className="py-3 px-4 cursor-pointer hover:bg-slate-100 transition-colors text-left group"
-              >
-                <div className="flex items-center">
-                  <span>Driver Name</span>
-                  {renderSortIcon('driverName')}
-                </div>
-              </th>
-
               {/* Total Column */}
               <th
                 scope="col"
@@ -90,16 +82,23 @@ export default function DriverTable({
           <tbody className="divide-y divide-slate-100 bg-white">
             {isLoading ? (
               <tr>
-                <td colSpan={4} className="py-12 text-center text-slate-500">
+                <td colSpan={3} className="py-12 text-center text-slate-500">
                   <div className="flex flex-col items-center justify-center space-y-2">
                     <div className="w-6 h-6 border-2 border-slate-900 border-t-transparent rounded-full animate-spin" />
                     <span className="text-xs font-medium text-slate-500">Loading drivers...</span>
                   </div>
                 </td>
               </tr>
+            ) : loadError ? (
+              <tr>
+                <td colSpan={3} className="py-10 text-center">
+                  <p className="text-sm font-semibold text-red-700">Could not load drivers from the database.</p>
+                  <p className="text-xs text-red-500 mt-0.5 max-w-xl mx-auto">{loadError}</p>
+                </td>
+              </tr>
             ) : drivers.length === 0 ? (
               <tr>
-                <td colSpan={4} className="py-10 text-center text-slate-500">
+                <td colSpan={3} className="py-10 text-center text-slate-500">
                   <p className="text-sm font-semibold text-slate-700">No drivers found.</p>
                   <p className="text-xs text-slate-400 mt-0.5">Try searching with a different driver number or name.</p>
                 </td>
@@ -124,16 +123,6 @@ export default function DriverTable({
                           Inactive
                         </span>
                       )}
-                    </td>
-
-                    {/* Driver Name */}
-                    <td className="py-3 px-4 text-slate-900 font-medium whitespace-nowrap">
-                      <Link
-                        href={`/drivers/${driver.id}`}
-                        className="hover:underline hover:text-slate-700"
-                      >
-                        {driver.driverName}
-                      </Link>
                     </td>
 
                     {/* Total */}
@@ -166,28 +155,36 @@ export default function DriverTable({
 
                         <span className="text-slate-300">/</span>
 
-                        {/* Deactivate if has payments; Delete if no payments */}
-                        {hasPayments ? (
-                          <button
-                            onClick={() => onDeleteOrDeactivate(driver)}
-                            className={`px-2 py-1 rounded font-medium transition-colors ${
-                              isInactive
-                                ? 'text-emerald-600 hover:bg-emerald-50'
-                                : 'text-amber-600 hover:bg-amber-50'
-                            }`}
-                            title={isInactive ? 'Activate Driver' : 'Deactivate Driver (has payment history)'}
-                          >
-                            {isInactive ? 'Activate' : 'Deactivate'}
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => onDeleteOrDeactivate(driver)}
-                            className="px-2 py-1 rounded font-medium text-rose-600 hover:bg-rose-50 transition-colors"
-                            title="Delete Driver (no payment history)"
-                          >
-                            Delete
-                          </button>
+                        {/* Drivers with history can be deactivated; Delete always
+                            removes the driver and any payments outright. */}
+                        {hasPayments && (
+                          <>
+                            <button
+                              onClick={() => onDeleteOrDeactivate(driver)}
+                              className={`px-2 py-1 rounded font-medium transition-colors ${
+                                isInactive
+                                  ? 'text-emerald-600 hover:bg-emerald-50'
+                                  : 'text-amber-600 hover:bg-amber-50'
+                              }`}
+                              title={isInactive ? 'Activate Driver' : 'Deactivate Driver (keeps payment history)'}
+                            >
+                              {isInactive ? 'Activate' : 'Deactivate'}
+                            </button>
+                            <span className="text-slate-300">/</span>
+                          </>
                         )}
+
+                        <button
+                          onClick={() => onForceDelete(driver)}
+                          className="px-2 py-1 rounded font-medium text-rose-600 hover:bg-rose-50 transition-colors"
+                          title={
+                            hasPayments
+                              ? `Delete driver and all ${driver.paymentCount} payment record(s)`
+                              : 'Delete Driver'
+                          }
+                        >
+                          Delete
+                        </button>
                       </div>
                     </td>
                   </tr>

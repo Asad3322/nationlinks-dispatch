@@ -50,13 +50,6 @@ export async function POST(request: NextRequest) {
       );
     }
 
-    if (!driverName || typeof driverName !== 'string' || !driverName.trim()) {
-      return NextResponse.json(
-        { error: 'Driver Name is required.' },
-        { status: 400 }
-      );
-    }
-
     if (status !== 'active' && status !== 'inactive') {
       return NextResponse.json(
         { error: 'Invalid status. Must be "active" or "inactive".' },
@@ -64,9 +57,11 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Name is optional: drivers are identified by number, so fall back to a
+    // number-derived label when none is supplied.
     const created = await dbService.createDriver({
       driverNumber: parsedNumber,
-      driverName: driverName.trim(),
+      driverName: typeof driverName === 'string' && driverName.trim() ? driverName.trim() : undefined,
       status,
     });
 

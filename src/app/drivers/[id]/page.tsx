@@ -45,7 +45,7 @@ export default function DriverDetailPage({
       pParams.set('driverId', resolvedParams.id);
       if (fromDate) pParams.set('fromDate', fromDate);
       if (toDate) pParams.set('toDate', toDate);
-      pParams.set('limit', '1000'); // Load full statement for driver
+      pParams.set('limit', 'all'); // Full statement, never truncated
 
       const pRes = await fetch(`/api/payments?${pParams.toString()}`);
       if (pRes.ok) {
@@ -84,7 +84,6 @@ export default function DriverDetailPage({
         fromDate: fromDate || undefined,
         toDate: toDate || undefined,
         driverNumber: driver.driverNumber,
-        driverName: driver.driverName,
       });
       toast.success(`Exported statement for Driver #${driver.driverNumber}`);
     } catch (err: any) {
@@ -138,7 +137,7 @@ export default function DriverDetailPage({
           </div>
           <div>
             <div className="flex items-center space-x-3">
-              <h1 className="text-2xl font-bold text-slate-900">{driver.driverName}</h1>
+              <h1 className="text-2xl font-bold text-slate-900">Driver #{driver.driverNumber}</h1>
               <Badge status={driver.status} />
             </div>
             <p className="text-xs text-slate-500 mt-1">
